@@ -1,0 +1,7 @@
+{
+  "python.defaultInterpreterPath": "/Users/shreyakhurana/Downloads/Major Project/.venv/bin/python",
+  "python.terminal.activateEnvironment": true,
+  "python.analysis.extraPaths": [
+    "/Users/shreyakhurana/Downloads/Major Project/.venv/lib/python3.14/site-packages"
+  ]
+}
