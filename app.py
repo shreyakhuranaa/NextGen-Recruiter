@@ -26,6 +26,7 @@ if not log.handlers:
     logging.basicConfig(level=logging.WARNING)
 log.setLevel(logging.WARNING)
 
+
 # ══════════════════════════════════════════════════════════════════════════════
 # WEBRTC AUDIO PROCESSOR (report Ch.3 §6 — Audio Capture + VAD)
 # Collects PCM frames from WebRTC stream into a global queue.
@@ -761,71 +762,74 @@ def analyse_prosody(raw_audio: bytes, fmt: str = "webm") -> Dict:
         log.warning(f"Prosody analysis error: {e}")
         return {}
 
+def analyse_fluency(transcript: str, raw_audio: bytes = None, fmt: str = "wav") -> dict:
+    import re
 
-def analyse_fluency(transcript: str, raw_audio: bytes = None, fmt: str = "webm") -> Dict:
-    """
-    Full fluency + prosody analysis (synopsis §5.1).
-    - Filler word detection from transcript
-    - Real prosody from raw audio via Librosa (pitch, pauses, energy)
-    Merges both into a single fluency dict.
-    """
-    base = {"filler_count": 0, "word_count": 0, "filler_rate": 0.0,
-            "fluency_score": 0, "fillers_found": [],
-            "pitch_mean": 0.0, "pitch_std": 0.0, "pause_ratio": 0.0,
-            "prosody_score": 0, "duration_sec": 0.0}
+    if not transcript:
+        return {}
 
-    if not transcript or transcript in ("Skipped", "No answer provided"):
-        return base
+    text = transcript.lower().strip()
 
-    # ── Filler word analysis ──────────────────────────────────────────────────
-    words      = transcript.lower().split()
+    # Words
+    words = re.findall(r'\b\w+\b', text)
     word_count = len(words)
-    text_lower = transcript.lower()
-    filler_count  = 0
+
+    # Fillers
+    fillers_list = ["um", "uh", "hmm", "like", "you know", "basically", "actually"]
+    filler_count = 0
     fillers_found = []
-    for fw in FILLER_WORDS:
-        cnt = text_lower.count(fw)
-        if cnt > 0:
-            filler_count += cnt
-            fillers_found.append(fw)
-    filler_rate   = round(filler_count / max(word_count, 1), 3)
-    filler_penalty = min(filler_rate * 40, 5)   # up to 5 pts off
 
-    # ── Librosa prosody (if raw audio provided) ───────────────────────────────
-    prosody = {}
-    if raw_audio and len(raw_audio) > 500:
-        prosody = analyse_prosody(raw_audio, fmt)
+    for f in fillers_list:
+        count = len(re.findall(rf'\b{re.escape(f)}\b', text))
+        if count:
+            filler_count += count
+            fillers_found.append(f)
 
-    prosody_score = prosody.get("prosody_score", 5)   # default mid if no audio
+    filler_rate = filler_count / max(word_count, 1)
 
-    # ── Combined fluency score ────────────────────────────────────────────────
-    fluency_score = max(0, min(10, round((prosody_score + (10 - filler_penalty)) / 2, 1)))
+    # Duration estimate
+    duration_sec = max(word_count / 2.5, 1.0)
+
+    # Pause estimation
+    pause_marks = len(re.findall(r'[.,;!?]', transcript))
+    pause_ratio = pause_marks / max(word_count, 1)
+
+    # Prosody
+    prosody_score = max(0, 10 - pause_ratio * 10)
 
     return {
-        "filler_count":  filler_count,
-        "word_count":    word_count,
-        "filler_rate":   filler_rate,
-        "fluency_score": fluency_score,
+        "word_count": word_count,
+        "filler_count": filler_count,
+        "filler_rate": round(filler_rate, 3),
         "fillers_found": fillers_found,
-        "pitch_mean":    prosody.get("pitch_mean",    0.0),
-        "pitch_std":     prosody.get("pitch_std",     0.0),
-        "pause_ratio":   prosody.get("pause_ratio",   0.0),
-        "prosody_score": prosody_score,
-        "duration_sec":  prosody.get("duration_sec",  0.0),
-        "energy_mean":   prosody.get("energy_mean",   0.0),
-        "speech_rate":   prosody.get("speech_rate",   0.0),
+        "duration_sec": round(duration_sec, 2),
+        "pause_ratio": round(pause_ratio, 3),
+        "pitch_mean": 0.0,
+        "pitch_std": 0.0,
+        "prosody_score": round(prosody_score, 2)
     }
 
-# ── Adaptive Elo (synopsis §5.1 — Elo-based skill scoring) ───────────────
-def elo_update(current_elo: float, answer_score: float) -> float:
-    """
-    Simplified Elo update. Expected performance = 0.5 (50%).
-    K-factor = 32. answer_score is normalised 0-1.
-    """
-    K = 32
-    expected = 0.5
-    actual = answer_score / 10.0
-    return round(current_elo + K * (actual - expected), 1)
+def enhanced_fluency_score(fluency: dict) -> float:
+    words = fluency.get("word_count", 0)
+    fillers = fluency.get("filler_count", 0)
+    duration = fluency.get("duration_sec", 1.0)
+    pause_ratio = fluency.get("pause_ratio", 0.0)
+
+    words_per_sec = words / max(duration, 1)
+
+    # Ideal speaking rate
+    rate_score = max(0, 10 - abs(words_per_sec - 2.5) * 3)
+
+    filler_score = max(0, 10 - fillers)
+    pause_score = max(0, 10 - pause_ratio * 10)
+
+    final_score = (
+        0.4 * rate_score +
+        0.3 * filler_score +
+        0.3 * pause_score
+    )
+
+    return round(final_score, 2)
 
 def q_hash(q: Dict) -> str:
     """Stable hash for a question dict — used to track seen questions across sessions."""
@@ -1264,6 +1268,15 @@ def _sentiment(answer: str) -> str:
         return "negative"
     return "neutral"
 
+def compute_confidence(fluency: dict, eval_data: dict) -> float:
+    base = eval_data.get("confidence", 5)
+
+    pause_penalty = fluency.get("pause_ratio", 0) * 5
+    filler_penalty = fluency.get("filler_count", 0) * 0.3
+
+    score = base - pause_penalty - filler_penalty
+    return max(0, min(10, score))
+
 def _confidence_score(answer: str, fluency: Dict, structure: Dict) -> float:
     words = _nlp_tokens(answer)
     hedge_count = sum(1 for t in words if t in HEDGE_WORDS)
@@ -1273,78 +1286,77 @@ def _confidence_score(answer: str, fluency: Dict, structure: Dict) -> float:
     base += min(2.0, fluency_score * 0.2)
     base -= min(2.5, hedge_count * 0.45 + filler_rate * 10)
     return round(max(0.0, min(10.0, base)), 1)
+def compute_confidence(fluency: dict, eval_data: dict) -> float:
+    base = eval_data.get("confidence", 5)
 
-def do_evaluate_answer(question: str, transcript: str, fluency: Dict) -> Dict:
-    empty = {"relevance": 0, "technical_depth": 0, "clarity": 0, "confidence": 0,
-             "sentiment": "neutral", "overall": 0,
-             "feedback": "No answer was provided for this question.",
-             "strengths": [], "improvements": ["Attempt to answer every question, even briefly."]}
-    clean = (transcript or "").strip()
-    if not clean or clean in ("Skipped", "No answer provided") or len(clean.split()) < 4:
-        return empty
+    pause_penalty = fluency.get("pause_ratio", 0) * 5
+    filler_penalty = fluency.get("filler_count", 0) * 0.3
 
-    keyword = _keyword_metrics(question, clean)
-    semantic = _semantic_similarity(question, clean)
-    structure = _structure_score(clean)
-    tech = _technical_depth_score(clean, keyword["keyword_score"], semantic)
+    score = base - pause_penalty - filler_penalty
+    return max(0, min(10, round(score, 2)))
 
-    relevance = round(min(10.0, keyword["keyword_score"] * 0.55 + semantic * 10 * 0.45), 1)
-    clarity = round(min(10.0, structure["structure_score"] * 0.75 + float(fluency.get("fluency_score", 5) or 5) * 0.25), 1)
-    confidence = _confidence_score(clean, fluency, structure)
-    sentiment = _sentiment(clean)
-    sent_map = {"positive": 10, "neutral": 6, "negative": 3}
-    overall = round(
-        tech["technical_depth"] * 0.50
-        + ((clarity + confidence) / 2) * 0.25
-        + relevance * 0.15
-        + sent_map[sentiment] * 0.10,
-        1,
-    )
+def do_evaluate_answer(question, transcript, fluency):
+    if not transcript or transcript in ["No answer provided", "Skipped"]:
+        return {
+            "technical_depth": 0,
+            "clarity": 0,
+            "confidence": 0,
+            "relevance": 0,
+            "behavioral": 0,
+            "sentiment": "neutral",
+            "feedback": "No answer provided."
+        }
 
-    strengths, improvements = [], []
-    if keyword["matched_keywords"]:
-        strengths.append(f"Covered relevant terms: {', '.join(keyword['matched_keywords'][:5])}.")
-    if semantic >= 0.25:
-        strengths.append("Answer stayed semantically aligned with the question.")
-    if structure["structure_score"] >= 6:
-        strengths.append("Response had a usable structure with examples or concrete details.")
-    if tech["technical_terms"]:
-        strengths.append(f"Used technical vocabulary such as {', '.join(tech['technical_terms'][:5])}.")
+    text = transcript.lower()
 
-    if relevance < 5.5:
-        improvements.append("Address the exact question more directly before adding background detail.")
-    if tech["technical_depth"] < 6:
-        improvements.append("Add more implementation detail: components, algorithms, APIs, data flow, edge cases, or trade-offs.")
-    if structure["structure_score"] < 6:
-        improvements.append("Use a clearer structure such as problem, approach, implementation, result, and validation.")
-    if confidence < 6:
-        improvements.append("Reduce hedging and give a more decisive technical explanation.")
+    # ── TECHNICAL DEPTH ─────────────────
+    tech_keywords = ["algorithm", "data", "complexity", "api", "database", "model", "system"]
+    tech_score = min(10, sum(1 for w in tech_keywords if w in text) * 1.5)
 
-    feedback = (
-        f"Local NLP evaluation: keyword coverage {keyword['keyword_coverage']:.0%}, "
-        f"semantic similarity {semantic:.2f}, structure score {structure['structure_score']}/10. "
-        f"Technical depth is based on technical vocabulary, implementation actions, trade-offs, "
-        f"and alignment with the question."
-    )
+    # ── CLARITY ────────────────────────
+    word_count = len(text.split())
+    clarity = min(10, word_count / 15)
+
+    # ── CONFIDENCE ─────────────────────
+    filler_rate = fluency.get("filler_rate", 0)
+    confidence = max(0, 10 - filler_rate * 20)
+
+    # ── RELEVANCE ──────────────────────
+    relevance = 8 if len(text) > 20 else 4
+
+    # ── 🔥 BEHAVIORAL SCORE (NEW) ──────
+    behavioral_keywords = [
+        "team", "challenge", "conflict", "lead", "responsibility",
+        "managed", "collaborated", "improved", "decision",
+        "problem", "solution", "result", "experience"
+    ]
+
+    behavioral_hits = sum(1 for w in behavioral_keywords if w in text)
+
+    # STAR method detection (Situation, Task, Action, Result)
+    star_score = 0
+    if "situation" in text or "when" in text:
+        star_score += 2
+    if "task" in text or "responsibility" in text:
+        star_score += 2
+    if "action" in text or "did" in text:
+        star_score += 3
+    if "result" in text or "outcome" in text:
+        star_score += 3
+
+    behavioral = min(10, behavioral_hits + star_score)
+
+    # ── SENTIMENT ──────────────────────
+    sentiment = "positive" if confidence > 6 else "neutral"
 
     return {
-        "relevance": relevance,
-        "technical_depth": tech["technical_depth"],
-        "clarity": clarity,
-        "confidence": confidence,
+        "technical_depth": round(tech_score, 1),
+        "clarity": round(clarity, 1),
+        "confidence": round(confidence, 1),
+        "relevance": round(relevance, 1),
+        "behavioral": round(behavioral, 1),   # ✅ IMPORTANT
         "sentiment": sentiment,
-        "overall": overall,
-        "feedback": feedback,
-        "strengths": strengths or ["Some answer content was provided."],
-        "improvements": improvements or ["Add measurable outcomes to make the answer stronger."],
-        "nlp_metrics": {
-            "keyword_score": keyword["keyword_score"],
-            "keyword_coverage": keyword["keyword_coverage"],
-            "matched_keywords": keyword["matched_keywords"],
-            "semantic_similarity": semantic,
-            "structure_score": structure["structure_score"],
-            "technical_terms": tech["technical_terms"],
-        },
+        "feedback": "Good answer. Try structuring better using STAR method."
     }
 
 # ── Report generation ──────────────────────────────────────────────────────
@@ -1397,21 +1409,25 @@ def do_generate_report(name: str, role: str, answers: List[Dict]) -> str:
     )
 
 # ── Composite score (synopsis §5 formula) ─────────────────────────────────
-def compute_composite(ev: Dict, fluency: Dict) -> float:
-    """
-    Synopsis formula:
-      Technical correctness   50%
-      Communication+confidence 25%
-      Soft skills + sentiment  15%
-      Fluency (filler proxy)   10%
-    """
-    if not ev or ev.get("overall", 0) == 0: return 0.0
-    tech   = float(ev.get("technical_depth", 0))
-    comm   = (float(ev.get("clarity", 0)) + float(ev.get("confidence", 0))) / 2
-    sent_map = {"positive": 10, "neutral": 6, "negative": 3}
-    soft   = (float(ev.get("relevance", 0)) + sent_map.get(ev.get("sentiment","neutral"), 6)) / 2
-    flu    = float(fluency.get("fluency_score", 5))
-    return round(tech * 0.50 + comm * 0.25 + soft * 0.15 + flu * 0.10, 1)
+def compute_composite(eval_dict, fluency):
+    tech = eval_dict.get("technical_depth", 0)
+    clarity = eval_dict.get("clarity", 0)
+    confidence = eval_dict.get("confidence", 0)
+    relevance = eval_dict.get("relevance", 0)
+    behavioral = eval_dict.get("behavioral", 0)
+    fluency_score = fluency.get("fluency_score", 0)
+
+    # Weighted formula
+    composite = (
+        tech * 0.4 +
+        ((clarity + confidence) / 2) * 0.2 +
+        relevance * 0.15 +
+        behavioral * 0.15 +
+        fluency_score * 0.1
+    )
+
+    return round(composite, 1)
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 def detect_fmt(data: bytes) -> str:
@@ -2106,41 +2122,100 @@ def advance(last_score: float = 0.0):
 def submit_answer():
     raw = st.session_state.pending_audio
     fmt = st.session_state.pending_fmt
-    fluency = {"filler_count":0,"word_count":0,"filler_rate":0.0,"fluency_score":0,"fillers_found":[],
-               "pitch_mean":0.0,"pitch_std":0.0,"pause_ratio":0.0,"prosody_score":0,"duration_sec":0.0}
 
+    # Always initialize fluency FIRST (prevents UnboundLocalError)
+    fluency = {
+        "filler_count": 0,
+        "word_count": 0,
+        "filler_rate": 0.0,
+        "fluency_score": 0,
+        "fillers_found": [],
+        "pitch_mean": 0.0,
+        "pitch_std": 0.0,
+        "pause_ratio": 0.0,
+        "prosody_score": 0,
+        "duration_sec": 0.0
+    }
+
+    # If no audio → treat as no answer
     if not raw or len(raw) < 100:
         save_answer("No answer provided", fluency)
-        advance(0.0); return
+        advance(0.0)
+        return
 
-    with st.spinner("Transcribing your answer"):
+    # ── TRANSCRIPTION ─────────────────
+    with st.spinner("Transcribing your answer..."):
         try:
             transcript, _ = do_transcribe(raw, fmt)
         except Exception as e:
+            log.warning(f"Transcription failed: {e}")
             transcript = ""
-            log.warning(f"submit_answer transcribe exception: {e}")
 
-    # Always advance — never get stuck on the same question
     transcript = (transcript or "").strip()
     if not transcript:
         transcript = "No answer provided"
 
+    # ── FLUENCY ANALYSIS ──────────────
     try:
-        fluency = analyse_fluency(transcript, raw_audio=raw, fmt=fmt)
-    except Exception:
-        pass
+        analysed = analyse_fluency(transcript, raw_audio=raw, fmt=fmt)
+        if analysed:
+            fluency.update(analysed)
+    except Exception as e:
+        log.warning(f"Fluency analysis failed: {e}")
 
+    # ── FINAL FLUENCY SCORE ───────────
+    fluency["fluency_score"] = enhanced_fluency_score(fluency)
+
+    # Save answer
     st.session_state.pending_audio = None
     st.session_state["transcription_failed"] = False
     st.session_state[f"submitted_{st.session_state.q_idx}"] = True
-    save_answer(transcript, fluency)
-    advance(5.0 if transcript != "No answer provided" else 0.0)
 
+    save_answer(transcript, fluency)
+
+    # Give small score boost only if answered
+    advance(5.0 if transcript != "No answer provided" else 0.0)
 def skip_answer():
-    fluency = {"filler_count":0,"word_count":0,"filler_rate":0.0,"fluency_score":0,"fillers_found":[]}
+    fluency = {
+        "filler_count": 0,
+        "word_count": 0,
+        "filler_rate": 0.0,
+        "fluency_score": 0,
+        "fillers_found": [],
+        "pitch_mean": 0.0,
+        "pitch_std": 0.0,
+        "pause_ratio": 0.0,
+        "prosody_score": 0,
+        "duration_sec": 0.0
+    }
+
     st.session_state[f"submitted_{st.session_state.q_idx}"] = True
+
     save_answer("Skipped", fluency)
+
+    # No score for skipped answers
     advance(0.0)
+
+def elo_update(current_elo: float, score: float) -> float:
+    """
+    Update ELO rating based on answer score (0–10 scale)
+    """
+
+    # Normalize score to 0–1
+    normalized = score / 10.0
+
+    # Expected performance (baseline = 0.5)
+    expected = 0.5
+
+    # K-factor (controls sensitivity)
+    K = 32  
+
+    # Elo update formula
+    new_elo = current_elo + K * (normalized - expected)
+
+    # Clamp between bounds
+    return max(800, min(1600, new_elo))
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: INTERVIEW
@@ -2300,7 +2375,21 @@ def page_results():
     composites = [a.get("composite", 0) for a in answered_list if a.get("composite",0) > 0]
     avg_composite = round(sum(composites)/max(len(composites),1), 1)
     completion_factor = answered / max(total, 1)
-    final_score = round(avg_composite * completion_factor, 1)
+    difficulty_weighted = sum(
+        a["composite"] * (1.2 if a.get("difficulty") == "hard" else 1.0)
+        for a in answered_list
+    ) / max(len(answered_list), 1)
+
+    completion_factor = answered / max(total, 1)
+
+    performance_score = round(avg_composite, 2)
+    completion_rate = answered / max(total, 1)
+
+    final_score = round(
+        0.7 * performance_score +
+        0.3 * (completion_rate * 10),
+        2
+    )
 
     avg_tech = round(sum(e.get("technical_depth",0) for e in evals)/n, 1)
     avg_comm = round(sum((e.get("clarity",0)+e.get("confidence",0))/2 for e in evals)/n, 1)
@@ -2309,6 +2398,16 @@ def page_results():
     sentiments = [e.get("sentiment","neutral") for e in evals]
     pos_pct  = round(sentiments.count("positive")/max(len(sentiments),1)*100)
 
+    tech_scores = [a["composite"] for a in answered_list if a["category"] == "technical"]
+    behavior_scores = [a["composite"] for a in answered_list if a["category"] == "behavioral"]
+
+    if behavior_scores:
+        avg_behavior_score = round(sum(behavior_scores)/len(behavior_scores), 2)
+    else:
+        avg_behavior_score = "N/A"
+
+    avg_tech_score = round(sum(tech_scores)/max(len(tech_scores),1),2)
+    avg_behavior_score = round(sum(behavior_scores)/max(len(behavior_scores),1),2)
     st.markdown(f"""
     <div style="text-align:center;padding:2rem 0 1.5rem;">
       <div style="font-size:2rem;font-weight:800;font-family:var(--heading);color:var(--t1);margin-bottom:.4rem;">Interview Complete</div>
@@ -2336,6 +2435,9 @@ def page_results():
     if st.button("Start New Interview", key="btn_restart"):
         for k in list(st.session_state.keys()): del st.session_state[k]
         go("landing")
+    
+    st.write(f"Technical Score: {avg_tech_score}/10")
+    st.write(f"Behavioral Score: {avg_behavior_score}/10")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PDF Generation
