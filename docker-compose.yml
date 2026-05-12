@@ -15,8 +15,8 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     environment:
-      SECRET_KEY: change-me
-      JWT_SECRET_KEY: change-me-too
+      SECRET_KEY: 8facd7d51398f2a5940131f1fe0ce998757340c861160c01
+      JWT_SECRET_KEY: dac84fa40807183d3fa1618e0b78476fb9b693003f19e446
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/nextgen_recruiter
       CORS_ORIGINS: http://localhost:8080
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -25,7 +25,7 @@ services:
     depends_on:
       - postgres
     ports:
-      - "5000:5000"
+      - "5001:5000"
 
   frontend:
     build:

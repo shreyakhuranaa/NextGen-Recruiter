@@ -70,6 +70,44 @@ def create_job():
     return jsonify({"job": job.to_dict()}), 201
 
 
+@recruiter_bp.patch("/jobs/<int:job_id>")
+@role_required(UserRole.RECRUITER.value)
+def update_job(job_id: int):
+    user = current_user()
+    job = Job.query.get_or_404(job_id)
+    if job.recruiter_id != user.id:
+        return jsonify({"message": "Forbidden"}), 403
+
+    data = request.get_json() or {}
+    status = (data.get("status") or "").strip().lower()
+    allowed_statuses = {item.value for item in JobStatus}
+    if status and status not in allowed_statuses:
+        return jsonify({"message": "Invalid job status"}), 400
+
+    if status:
+        job.status = status
+
+    if "title" in data and data["title"]:
+        job.title = data["title"].strip()
+    if "department" in data:
+        job.department = (data.get("department") or "").strip()
+    if "location" in data:
+        job.location = (data.get("location") or "").strip()
+    if "description" in data and data["description"]:
+        job.description = data["description"].strip()
+    if "interviewFocus" in data:
+        job.interview_focus = (data.get("interviewFocus") or "").strip()
+    if "requirements" in data:
+        requirements = data.get("requirements", [])
+        if isinstance(requirements, list):
+            job.requirements = ",".join([item.strip() for item in requirements if item and item.strip()])
+        elif isinstance(requirements, str):
+            job.requirements = requirements.strip()
+
+    db.session.commit()
+    return jsonify({"job": job.to_dict()})
+
+
 @recruiter_bp.get("/jobs/<int:job_id>/candidates")
 @role_required(UserRole.RECRUITER.value)
 def job_candidates(job_id: int):

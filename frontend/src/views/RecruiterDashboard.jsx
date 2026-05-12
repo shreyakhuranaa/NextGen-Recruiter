@@ -19,6 +19,8 @@ export function RecruiterDashboard() {
   const [form, setForm] = useState(jobDefaults);
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [candidates, setCandidates] = useState([]);
+  const [jobActionBusy, setJobActionBusy] = useState(false);
+  const [jobMessage, setJobMessage] = useState("");
 
   async function load() {
     const response = await api.get("/recruiter/dashboard");
@@ -55,6 +57,27 @@ export function RecruiterDashboard() {
     });
     setForm(jobDefaults);
     await load();
+  }
+
+  async function updateJobStatus(job, nextStatus) {
+    if (!job) return;
+    setJobActionBusy(true);
+    setJobMessage("");
+    try {
+      await api.patch(`/recruiter/jobs/${job.id}`, {
+        status: nextStatus,
+      });
+      setJobMessage(
+        nextStatus === "closed"
+          ? "Position closed successfully."
+          : "Position reopened successfully."
+      );
+      await load();
+    } catch (error) {
+      setJobMessage(error.response?.data?.message || "Unable to update the job right now.");
+    } finally {
+      setJobActionBusy(false);
+    }
   }
 
   if (!dashboard) {
@@ -143,8 +166,46 @@ export function RecruiterDashboard() {
 
           {selectedJob ? (
             <div className="rounded-3xl border border-slate-200 bg-slate-50 p-5">
-              <h3 className="text-xl font-semibold text-ink">{selectedJob.title}</h3>
-              <p className="mt-2 text-sm text-slate-600">{selectedJob.description}</p>
+              <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                <div>
+                  <h3 className="text-xl font-semibold text-ink">{selectedJob.title}</h3>
+                  <p className="mt-2 text-sm text-slate-600">{selectedJob.description}</p>
+                </div>
+                <div className="flex flex-wrap items-center gap-3">
+                  <span
+                    className={`rounded-full px-3 py-1 text-xs font-semibold uppercase ${
+                      selectedJob.status === "closed"
+                        ? "bg-rose-100 text-rose-700"
+                        : selectedJob.status === "draft"
+                          ? "bg-amber-100 text-amber-700"
+                          : "bg-emerald-100 text-emerald-700"
+                    }`}
+                  >
+                    {selectedJob.status}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={jobActionBusy}
+                    onClick={() =>
+                      updateJobStatus(
+                        selectedJob,
+                        selectedJob.status === "closed" ? "active" : "closed"
+                      )
+                    }
+                    className={`rounded-2xl px-4 py-2 text-sm font-semibold text-white disabled:opacity-60 ${
+                      selectedJob.status === "closed"
+                        ? "bg-emerald-600 hover:bg-emerald-700"
+                        : "bg-rose-600 hover:bg-rose-700"
+                    }`}
+                  >
+                    {jobActionBusy
+                      ? "Updating..."
+                      : selectedJob.status === "closed"
+                        ? "Reopen Position"
+                        : "Close Position"}
+                  </button>
+                </div>
+              </div>
               <div className="mt-4 flex flex-wrap gap-2">
                 {selectedJob.requirements.map((item) => (
                   <span key={item} className="rounded-full bg-white px-3 py-1 text-xs font-medium text-brand">
@@ -152,6 +213,7 @@ export function RecruiterDashboard() {
                   </span>
                 ))}
               </div>
+              {jobMessage ? <p className="mt-4 text-sm text-slate-600">{jobMessage}</p> : null}
             </div>
           ) : null}
 
