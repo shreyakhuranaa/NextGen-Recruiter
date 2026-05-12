@@ -14,7 +14,8 @@ from ..models import (
     StudentResume,
     UserRole,
 )
-from ..services.interview_pipeline import build_score_report, score_answer_from_scratch
+from ..services.ai_evaluator import evaluate_answer, summarize_attempt_with_ai
+from ..services.interview_pipeline import build_score_report
 from ..services.resume_pipeline import dump_parsed_resume, parse_resume_file
 
 student_bp = Blueprint("student", __name__)
@@ -111,7 +112,8 @@ def submit_answer(attempt_id: int):
     if existing:
         return jsonify({"message": "Question already answered"}), 409
 
-    evaluation = score_answer_from_scratch(question.prompt, response_text, _context_keywords(attempt))
+    context_keywords = _context_keywords(attempt)
+    evaluation = evaluate_answer(question.prompt, response_text, context_keywords)
     answer = AttemptAnswer(
         attempt_id=attempt.id,
         question_id=question.id,
@@ -127,9 +129,11 @@ def submit_answer(attempt_id: int):
             "answer": answer.to_dict(),
             "analytics": {
                 "wordCount": evaluation["wordCount"],
-                "relevanceScore": evaluation["relevanceScore"],
-                "depthScore": evaluation["depthScore"],
-                "clarityScore": evaluation["clarityScore"],
+                "relevanceScore": evaluation.get("relevanceScore", 0),
+                "depthScore": evaluation.get("depthScore", 0),
+                "clarityScore": evaluation.get("clarityScore", 0),
+                "strengths": evaluation.get("strengths", []),
+                "growthAreas": evaluation.get("growthAreas", []),
             },
         }
     ), 201
@@ -147,7 +151,19 @@ def complete_attempt(attempt_id: int):
     if attempt.status == InterviewStatus.TERMINATED.value:
         return jsonify({"message": "Interview was terminated"}), 400
 
-    summary = build_score_report(attempt, attempt.answers)
+    answer_payloads = [
+        {
+            "question": answer.question.prompt if answer.question else "",
+            "category": answer.question.category if answer.question else "",
+            "answer": answer.response_text or "",
+            "score": answer.score or 0,
+            "feedback": answer.feedback or "",
+        }
+        for answer in sorted(
+            attempt.answers, key=lambda item: item.question.position if item.question else item.id
+        )
+    ]
+    summary = summarize_attempt_with_ai(attempt, answer_payloads) if answer_payloads else build_score_report(attempt, attempt.answers)
     attempt.status = InterviewStatus.COMPLETED.value
     attempt.completed_at = datetime.utcnow()
     attempt.overall_score = summary["overallScore"]

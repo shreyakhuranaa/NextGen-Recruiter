@@ -24,6 +24,14 @@ function App() {
         }
       />
       <Route
+        path="/student/interview/:attemptId"
+        element={
+          <ProtectedRoute role="student">
+            <StudentDashboard secureMode />
+          </ProtectedRoute>
+        }
+      />
+      <Route
         path="/recruiter"
         element={
           <ProtectedRoute role="recruiter">

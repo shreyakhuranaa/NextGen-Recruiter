@@ -57,6 +57,18 @@ def start_interview(job_id: int):
     if not resume or not resume.parsed_json:
         return jsonify({"message": "Upload and parse a resume before starting the interview."}), 400
 
+    existing_attempt = (
+        InterviewAttempt.query.filter_by(
+            student_id=user.id,
+            job_id=job.id,
+            status=InterviewStatus.IN_PROGRESS.value,
+        )
+        .order_by(InterviewAttempt.created_at.desc())
+        .first()
+    )
+    if existing_attempt:
+        return jsonify({"attempt": _serialize_attempt(existing_attempt), "resumed": True}), 200
+
     attempt = InterviewAttempt(
         student_id=user.id,
         job_id=job.id,
@@ -68,7 +80,7 @@ def start_interview(job_id: int):
 
     import json
 
-    generated = generate_questions_from_scratch(job, json.loads(resume.parsed_json), count=6)
+    generated = generate_questions_from_scratch(job, json.loads(resume.parsed_json), count=10)
     for index, item in enumerate(generated, start=1):
         db.session.add(
             InterviewQuestion(
